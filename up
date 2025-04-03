@@ -1,0 +1,117 @@
+select
+ event_time as event_time,
+"ericsson" as  vendor,
+fqdn,
+labels,
+KEY as metric_name,
+safe_cast(increase_value as bignumeric) as metric_increase_value,
+safe_cast(sum_value as bignumeric) as metric_sum_value,
+safe_cast(rate_value as bignumeric) as metric_rate_value,
+trans_dt,
+datetime(current_timestamp) as schedule_time,
+current_timestamp as updated_timestamp
+from
+(
+WITH event_timestamps as
+(
+select distinct DATETIME_TRUNC(timestamp(`timestamp`),HOUR) as trans_hr from  vz-it-pr-i37v-ndldo-0.vzn_ndl_aether_core_tbls_v.ericsson_vnf_upf_raw_v1
+  where DATETIME_TRUNC(timestamp(insert_date_utc),HOUR) in
+  unnest(GENERATE_TIMESTAMP_ARRAY(TIMESTAMP_SUB(DATETIME_TRUNC(timestamp('2025-04-03 03:35:00'),HOUR),INTERVAL 1-1 HOUR),DATETIME_TRUNC(timestamp('2025-04-03 03:35:00'),HOUR),INTERVAL 1 HOUR))
+--  and trans_dt=date(timestamp('2025-04-03 03:35:00'))
+   and trans_dt is not null-- need to check
+),
+
+  base_data AS (
+  select *,
+  MD5(labels) as checksum
+  from (
+  SELECT
+  distinct
+    TIMESTAMP_SECONDS(CAST(FLOOR(UNIX_SECONDS(`timestamp`)/(1*60*60)) * (1*60*60) AS INT64)) AS event_time,
+    fqdn,
+TO_JSON_STRING(JSON_REMOVE(SAFE.PARSE_JSON(labels),'$.__name__','$.jobid','$.localdn')) as labels,
+--    JSON_VALUE(labels,'$.instance') as instance,
+    lower(name) as KEY,
+    SAFE_CAST(nullif(value,'NaN') AS FLOAT64) AS value,
+    DATE(`timestamp`) AS trans_dt,
+    `timestamp`,
+ FROM
+    vz-it-pr-i37v-ndldo-0.vzn_ndl_aether_core_tbls_v.ericsson_vnf_upf_raw_v1
+  
+      WHERE
+    DATETIME_TRUNC(timestamp(`timestamp`),HOUR) in (select trans_hr from event_timestamps)
+    and insert_date_utc > (select min(trans_hr) from event_timestamps)
+and trans_dt in (select date(trans_hr) from event_timestamps)
+and trans_dt is not null
+)
+),
+max_min_hr_diff AS (
+  SELECT EXTRACT(MINUTE FROM max(timestamp)-min(timestamp)) as hr_diff
+  FROM
+    vz-it-pr-i37v-ndldo-0.vzn_ndl_aether_core_tbls_v.ericsson_vnf_upf_raw_v1
+  WHERE trans_dt = date(timestamp('2025-04-03 03:35:00'))
+  AND timestamp BETWEEN timestamp(DATETIME_TRUNC(DATETIME ('2025-04-03 03:35:00'), HOUR)) AND  timestamp(DATETIME_ADD(DATETIME_TRUNC(DATETIME ('2025-04-03 03:35:00'), HOUR), INTERVAL 59 MINUTE))
+),
+window_data AS (
+select *,if(value<prev_value,1,0) has_reset from (
+select
+   trans_dt,
+   event_time,
+   fqdn,
+   labels,
+   checksum,
+   KEY,
+   value,
+   `timestamp`,
+   SAFE_CAST(LAG(value) OVER (PARTITION BY fqdn, checksum, KEY, DATETIME_TRUNC(timestamp,HOUR) ORDER BY `timestamp`) AS FLOAT64) AS prev_value
+from base_data
+)
+),
+
+  reset_adjusted AS (
+  SELECT
+    event_time,
+    fqdn,
+--    instance,
+    trans_dt,
+    MAX(labels) AS labels,
+    checksum,
+    KEY,
+    sum(value) as sum_value,
+    SUM(CASE
+        WHEN prev_value is NULL THEN 0
+        WHEN has_reset =1 THEN value
+        ELSE value - IFNULL(prev_value,0)
+    END
+      ) AS increase_value
+  FROM
+    window_data
+  GROUP BY
+  trans_dt,
+    event_time,
+--    instance,
+    fqdn,
+   checksum,
+    KEY )
+
+SELECT
+  event_time,
+  fqdn,
+  trans_dt,
+  SAFE.PARSE_JSON(labels) AS labels,
+--  instance,
+  checksum,
+  KEY,
+  increase_value,
+  sum_value,
+  increase_value/(1*60*(select hr_diff from max_min_hr_diff)) as rate_value,
+FROM
+  reset_adjusted
+ORDER BY
+  trans_dt,
+    event_time,
+--    instance,
+    fqdn,
+   checksum,
+    KEY
+  )
