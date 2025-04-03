@@ -1,0 +1,15 @@
+for index in range(start,len(item['values'])):
+                metricTime=datetime.fromtimestamp(item["values"][index][0], pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
+                locTime=datetime.fromtimestamp(item["values"][index][0],pytz.timezone(timezone)).strftime('%Y-%m-%d %H:%M:%S')
+                #need to do difference for metricValues if upf
+                if(nf=='ericsson-upf'):
+                    #need to check for reset
+                    if(int(item['values'][index][1])>int(item['values'][index-1][1])):
+                        metricValue=(int(item['values'][index][1])-int(item['values'][index-1][1]))*8/1_000_000_000
+                        time=(datetime.fromtimestamp(item['values'][index][0])-datetime.fromtimestamp(item['values'][index-1][0])).total_seconds()
+                        metricValue=round(float(metricValue/time),5)
+                    else: #UPF was reset in this timeframe
+                        metricValue=0
+                else:
+                    metricValue=int(item['values'][index][1])
+                vals.append(('aether',name,apn,dev,pairdev,primary,sap,region,metricTime,locTime,metricValue))
